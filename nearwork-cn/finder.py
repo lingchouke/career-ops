@@ -7,9 +7,9 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from assessment import assess, suggestion
+from assessment import assess, resume_profile, suggestion
 from discovery import ALL, title_cn
-from job_store import search, status
+from job_store import ANY_CITY, library_stats, search
 from sync_jobs import synchronize
 from nearwork import read_resume
 
@@ -48,7 +48,8 @@ class JobFinder:
         self.pages=[ttk.Frame(self.body) for _ in range(3)]
         for page in self.pages:
             page.grid(row=0,column=0,sticky="nsew")
-        self.city=tk.StringVar(value="上海")
+        self.city=tk.StringVar(value=ANY_CITY)
+        self.city_labels={ANY_CITY:ANY_CITY}
         self.kind=tk.StringVar(value=ALL)
         self.keyword=tk.StringVar()
         self.file=tk.StringVar(value="可选择文字版 PDF、Word 或文本文件")
@@ -80,7 +81,7 @@ class JobFinder:
         form.columnconfigure(1,weight=1)
         for i,label in enumerate(("工作城市","公司类型","岗位关键词")):
             ttk.Label(form,text=label,style="Field.TLabel").grid(row=i,column=0,padx=(0,18),pady=9,sticky="w")
-        self.citybox=ttk.Combobox(form,textvariable=self.city,values=("上海","北京","深圳","广州","杭州","成都","苏州","香港"),width=24)
+        self.citybox=ttk.Combobox(form,textvariable=self.city,values=[ANY_CITY],state="readonly",width=24)
         self.citybox.grid(row=0,column=1,sticky="w")
         self.kinds=ttk.Combobox(form,textvariable=self.kind,values=[ALL],state="readonly",width=24)
         self.kinds.grid(row=1,column=1,sticky="w")
@@ -97,6 +98,8 @@ class JobFinder:
         data.pack(anchor="w",pady=5)
         self.update_jobs=ttk.Button(data,text="更新岗位数据",command=self.update_library)
         self.update_jobs.pack(side="left")
+        self.stats_button=ttk.Button(data,text="岗位库统计",command=self.show_statistics)
+        self.stats_button.pack(side="left",padx=(8,0))
         ttk.Label(data,textvariable=self.library,style="Muted.TLabel",wraplength=430).pack(side="left",padx=10)
         ttk.Label(page,textvariable=self.notice,wraplength=620,style="Muted.TLabel").pack(anchor="w",pady=5)
         self.words.bind("<Return>",lambda _:self.find())
@@ -118,19 +121,55 @@ class JobFinder:
 
     def refresh_library(self):
         try:
-            count, updated, kinds=status()
+            stats=library_stats()
         except Exception:
             self.library.set("暂时无法读取本机的岗位。仍可粘贴岗位描述进行分析。")
             return
+        selected=self.city_labels.get(self.city.get(),ANY_CITY)
+        self.city_labels={ANY_CITY:ANY_CITY}
+        self.city_labels.update({f"{city}（{count} 个岗位）":city for city,count in stats.cities.items()})
+        self.citybox.configure(values=list(self.city_labels))
+        self.city.set(next((label for label,city in self.city_labels.items() if city==selected),ANY_CITY))
+        count,updated,kinds=stats.total,stats.updated,stats.industries
         self.kinds.configure(values=[ALL]+kinds)
         if self.kind.get() not in [ALL]+kinds:
             self.kind.set(ALL)
         self.library.set(f"本机有 {count} 个岗位 · 最近更新 {updated[:16].replace('T',' ')}"
                          if updated else "首次使用请点「更新岗位数据」。之后可以离线查找。")
 
+    def show_statistics(self):
+        try:
+            stats=library_stats()
+        except Exception:
+            self.notice.set("暂时无法读取本机岗位，请重试。")
+            return
+        window=tk.Toplevel(self.root)
+        window.title("岗位库统计")
+        window.transient(self.root)
+        panel=ttk.Frame(window,padding=18)
+        panel.pack(fill="both",expand=True)
+        ttk.Label(panel,text=f"本机共有 {stats.total} 个岗位",style="Title.TLabel").pack(anchor="w")
+        ttk.Label(panel,text="一个岗位可在多个城市招聘，每个城市各计一次。",style="Muted.TLabel").pack(anchor="w",pady=(5,12))
+        tables=ttk.Frame(panel)
+        tables.pack(fill="both",expand=True)
+        for heading,counts in (("公司",stats.companies),("城市",stats.cities)):
+            frame=ttk.Frame(tables,padding=4)
+            frame.pack(side="left",fill="both",expand=True)
+            table=ttk.Treeview(frame,columns=("name","count"),show="headings",height=9)
+            for col,title,width in (("name",heading,150),("count","岗位数",75)):
+                table.heading(col,text=title)
+                table.column(col,width=width,anchor="w" if col=="name" else "center")
+            scroll=ttk.Scrollbar(frame,command=table.yview)
+            scroll.pack(side="right",fill="y")
+            table.configure(yscrollcommand=scroll.set)
+            table.pack(fill="both",expand=True)
+            for name,count in counts.items():
+                table.insert("","end",values=(name,count))
+        ttk.Button(panel,text="关闭",command=window.destroy).pack(anchor="e",pady=(8,0))
+
     def set_busy(self, busy):
         self.busy=busy
-        for w in (self.upload,self.go,self.citybox,self.kinds,self.words,self.update_jobs,self.paste):
+        for w in (self.upload,self.go,self.citybox,self.kinds,self.words,self.update_jobs,self.paste,self.stats_button):
             w.state(["disabled" if busy else "!disabled"])
 
     def update_library(self):
@@ -216,9 +255,9 @@ class JobFinder:
     def find(self):
         if self.busy:
             return
-        city=self.city.get().strip().removesuffix("市")
-        if not self.resume or not city:
-            self.notice.set("请先上传简历。" if not self.resume else "请填写想工作的城市。")
+        city=self.city_labels.get(self.city.get(),ANY_CITY)
+        if not self.resume:
+            self.notice.set("请先上传简历。")
             return
         kind,word,resume=self.kind.get(),self.keyword.get().strip(),self.resume
         self.set_busy(True)
@@ -227,9 +266,10 @@ class JobFinder:
             try:
                 jobs=search(city,kind,word)
                 entries=[]
+                profile=resume_profile(resume)
                 for j in jobs:
                     label=title_cn(j["岗位"])
-                    entries.append((j,label,assess(resume,j)))
+                    entries.append((j,label,assess(resume,j,profile)))
                 entries.sort(key=lambda e:(("高","中","低").index(e[2]["grade"]),not bool(e[2]["facts"]),e[1],e[0]["公司"]))
                 self.messages.put((entries,None))
             except Exception:
@@ -255,7 +295,9 @@ class JobFinder:
         self.list_title.set(f"找到 {len(entries)} 个岗位")
         scope=" · ".join(x for x in (city,kind,word) if x)
         note="点一个岗位查看分析。" if entries else "本机没有符合条件的岗位。可以返回修改条件、更新岗位数据，或粘贴岗位描述。"
-        self.info.set(scope+"\n"+note)
+        if entries and all(result["grade"]=="低" for _,_,result in entries):
+            note="这些岗位与你的简历方向差距较大，建议更新岗位数据或粘贴你想投的岗位"
+        self.info.set(note+"\n"+scope)
         self.show(1)
 
     def click_row(self,event):
@@ -306,21 +348,33 @@ class JobFinder:
         for fact,quote in r["facts"]:
             box.insert("end","• "+fact+"\n","item")
             box.insert("end","简历原文：“"+quote+"”\n","proof")
-        box.insert("end","欠缺项与建议\n","heading")
-        box.insert("end","下列项目是简历里尚未证实的部分，也可能是你做过但没写清楚。\n")
-        for key,heading in (("必须","必须具备"),("加分","加分条件"),("其他","岗位还提到（未说明是否必须）")):
-            items=r["missing"][key]
-            if key=="其他" and not items:
-                continue
-            box.insert("end",heading+"\n","heading")
-            if not items:
-                box.insert("end","没有识别到尚待补充的此类条件。\n")
-            for item in items:
-                box.insert("end","• "+item+"\n","item")
-                box.insert("end","建议："+suggestion(item)+"\n","proof")
+        if r["grade"]=="低" and r["mismatch"]:
+            box.insert("end","这个岗位与你的简历方向差距较大，不建议投递\n","heading")
+            box.insert("end","可以优先考虑的岗位方向\n","heading")
+            for role,quote in r["directions"]:
+                box.insert("end","• "+role+"\n","item")
+                box.insert("end","简历原文：“"+quote+"”\n","proof")
+        else:
+            self.display_gaps(r["missing"])
         box.configure(state="disabled")
         box.yview_moveto(0)
         self.show(2)
+
+    def display_gaps(self,missing):
+        box=self.detail
+        box.insert("end","欠缺项与建议\n","heading")
+        if not any(missing.values()):
+            box.insert("end","目前没有可列出的具体欠缺项。\n")
+            return
+        box.insert("end","以下要求还缺少简历原文支持。如果做过，可以补充具体经历。\n")
+        for key,heading in (("必须","必须具备"),("加分","加分条件"),("其他","岗位还提到（未说明是否必须）")):
+            items=missing[key]
+            if not items:
+                continue
+            box.insert("end",heading+"\n","heading")
+            for item in items:
+                box.insert("end","• "+item+"\n","item")
+                box.insert("end","建议："+suggestion(item)+"\n","proof")
 
     def original(self):
         if self.selected:

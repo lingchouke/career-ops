@@ -18,6 +18,17 @@ FIELDS = {
     "技术支持": ("technical support","applications engineer","技术支持","应用工程师"),
 }
 OPTIONAL = re.compile(r"优先|加分|更佳|preferred|nice[- ]to[- ]have|a plus|desirable|bonus",re.I)
+ROLE_IDEAS = {
+    "机械与设备": ("机械设计", "机械制图"),
+    "电池与材料": ("电池研发", "材料测试"),
+    "芯片与电子": ("电子硬件开发", "电子产品测试"),
+    "软件开发": ("软件开发", "应用开发与维护"),
+    "广告营销": ("广告运营", "营销推广"),
+    "产品管理": ("产品策划", "产品运营"),
+    "销售与客户": ("销售代表", "客户维护"),
+    "人力资源": ("人力资源专员", "招聘协调"),
+    "技术支持": ("技术支持", "应用技术服务"),
+}
 MANDATORY = re.compile(r"必须|须持|必备|硬性|至少|must\b|required\b|at least",re.I)
 REQ_HEAD = re.compile(r"required skills|requirements|qualifications|minimum qualifications|what you.ll bring|岗位要求|任职要求|任职资格|必备条件|必须项",re.I)
 OPT_HEAD = re.compile(r"加分(?:项|条件)?|优先条件|preferred qualifications|nice[- ]to[- ]have|bonus(?: points)?",re.I)
@@ -47,6 +58,23 @@ def conditions(jd):
 
 def field_hits(text):
     return {name for name,terms in FIELDS.items() if any(mentions(text,t) for t in terms)}
+
+
+def related_roles(fields, lines):
+    ranked = []
+    for field in sorted(fields):
+        evidence = [(sum(mentions(line,t) for t in FIELDS[field]), line) for line in lines]
+        score, quote = max(evidence, key=lambda item:item[0])
+        first, second = ROLE_IDEAS[field]
+        if field=="机械与设备" and re.search(r"夹具|工装|fixture",quote,re.I):
+            first, second = "工装夹具设计", "机械设计"
+        ranked.append((score, first, second, quote))
+    ranked.sort(key=lambda row:-row[0])
+    ideas = [(first, quote) for _,first,_,quote in ranked[:3]]
+    if len(ideas)==1:
+        _, _, second, quote = ranked[0]
+        ideas.append((second,quote))
+    return ideas
 
 
 def evidence_for(need, lines):
@@ -82,16 +110,22 @@ def suggestion(label):
     return "如果做过，补上一例，写清你负责什么、怎么做、结果如何；没有经历可先做一个相关练习。"
 
 
-def assess(resume,job):
+def resume_profile(resume):
     lines=[s for s in clauses(resume) if not DENY.search(s) and not NEGATIVE.search(s) and not ASPIRATION.search(s)]
+    fields=set().union(*(field_hits(line) for line in lines))
+    return lines,fields,related_roles(fields,lines)
+
+
+def assess(resume,job,profile=None):
+    lines,candidate,directions=profile if profile is not None else resume_profile(resume)
     needs=list(conditions(job["岗位要求"]))
-    candidate=field_hits(" ".join(lines))
     target=field_hits(job["岗位"])
     if not target:
         target=field_hits(" ".join(n for n,_ in needs))
     mismatch=bool(target and candidate and target.isdisjoint(candidate))
     facts, missing, resolved_core = [], {"必须":[],"加分":[],"其他":[]}, 0
     partial_professional=False
+    missing_required=False
     for need,priority in needs:
         hits,complete=evidence_for(need,lines)
         if not mismatch and complete:
@@ -113,14 +147,14 @@ def assess(resume,job):
                 resolved_core+=1
             continue
         label=topic(need)
+        if priority=="必须":
+            missing_required=True
         dest=missing.get(priority,missing["其他"])
         if label and label not in dest:
             dest.append(label)
-        elif not label and "另有要求需要核对招聘原文" not in dest:
-            dest.append("另有要求需要核对招聘原文")
     core_overlap=bool(target & candidate)
     required_count=sum(p!="加分" for _,p in needs)
-    high=bool(required_count and resolved_core>=required_count*.6 and not missing["必须"])
+    high=bool(required_count and resolved_core>=required_count*.6 and not missing_required)
     # Generic English/teamwork evidence alone cannot raise an unrelated job.
     professional=any(not any(t in label for t in ("英语","跨团队","跨部门","项目管理")) for label,_ in facts)
     if mismatch:
@@ -142,4 +176,5 @@ def assess(resume,job):
         reason="有相关工作方向或技能，仍有要求需要核实。"
     else:
         reason="简历里还没有找到足够的岗位核心经历。"
-    return {"grade":grade,"reason":reason,"facts":facts,"missing":missing,"mismatch":mismatch}
+    return {"grade":grade,"reason":reason,"facts":facts,"missing":missing,"mismatch":mismatch,
+            "directions":directions if mismatch else []}

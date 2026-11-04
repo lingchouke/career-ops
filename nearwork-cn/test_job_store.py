@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from job_store import search, status
+from job_store import library_stats, search, status
 from sync_jobs import synchronize
 
 
@@ -39,6 +39,12 @@ class LibraryTests(unittest.TestCase):
         with patch("sync_jobs.PAGE",2):
             self.assertEqual(self.sync(request),({"甲公司":1,"乙公司":2},{}))
         with patch("socket.socket.connect",side_effect=AssertionError("search attempted network access")):
+            stats = library_stats(self.db)
+            self.assertEqual(stats.companies,{"甲公司":1,"乙公司":2})
+            self.assertEqual(stats.cities,{"上海":3,"柏林":2})
+            self.assertEqual(len(search("不限","","",self.db)),stats.total)
+            for city,count in stats.cities.items():
+                self.assertEqual(len(search(city,"","",self.db)),count)
             a, = search("上海市","制造","机械工程师 夹具",self.db)
             self.assertEqual(a["岗位要求"],"任职要求\n使用夹具")
             b = search("上海","软件","sql",self.db)
