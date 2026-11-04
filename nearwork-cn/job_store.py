@@ -5,6 +5,7 @@ from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import combinations
 from pathlib import Path
 
 from discovery import ALL, title_cn
@@ -112,9 +113,7 @@ def status(path=DB):
     return stats.total, stats.updated, stats.industries
 
 
-def search(city, industry, keywords, path=DB):
-    if not Path(path).exists():
-        return []
+def search_filter(city, industry, keywords):
     city = city.strip()
     if city != UNKNOWN_CITY and city not in CITY_NAMES.values():
         city = city.removesuffix("市")
@@ -128,10 +127,51 @@ def search(city, industry, keywords, path=DB):
     for word in keywords.casefold().split():
         filters.append("(instr(keywords,?) OR instr(lower(description),?))")
         params.extend((word,word))
-    sql = "SELECT title,company,location,description,url FROM jobs JOIN sources USING(source)"
+    sql = " FROM jobs JOIN sources USING(source)"
     if filters:
         sql += " WHERE " + " AND ".join(filters)
-    with closing(sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro",uri=True)) as db:
-        db.create_function("in_city",2,lambda place, target:
-                           any(name.casefold()==target for name in location_cities(place)))
-        return [dict(zip(("岗位","公司","城市","岗位要求","来源"),r)) for r in db.execute(sql,params)]
+    return sql, params
+
+
+def open_search_db(path):
+    db = sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro",uri=True)
+    db.create_function("in_city",2,lambda place, target:
+                       any(name.casefold()==target for name in location_cities(place)))
+    return db
+
+
+def search(city, industry, keywords, path=DB):
+    if not Path(path).exists():
+        return []
+    suffix,params=search_filter(city,industry,keywords)
+    with closing(open_search_db(path)) as db:
+        rows=db.execute("SELECT title,company,location,description,url"+suffix,params)
+        return [dict(zip(("岗位","公司","城市","岗位要求","来源"),r)) for r in rows]
+
+
+def broader_searches(city, industry, keywords, path=DB):
+    """Offer the smallest changes that yield results, counted against one local snapshot."""
+    if not Path(path).exists():
+        return 0, []
+    original=(city,industry,keywords)
+    defaults=(ANY_CITY,ALL,"")
+    captions=("不限城市","不限公司类型","不限岗位关键词")
+    active=[i for i in (0,2,1) if original[i] and original[i]!=defaults[i]]
+    with closing(open_search_db(path)) as db:
+        db.execute("BEGIN")
+        total,=db.execute("SELECT count(*) FROM jobs").fetchone()
+        options=[]
+        if total:
+            for size in range(1,len(active)+1):
+                for relaxed in combinations(active,size):
+                    filters=tuple(defaults[i] if i in relaxed else value for i,value in enumerate(original))
+                    suffix,params=search_filter(*filters)
+                    count,=db.execute("SELECT count(*)"+suffix,params).fetchone()
+                    if count:
+                        caption="、".join(captions[i] for i in relaxed)
+                        if 0 not in relaxed and city and city!=ANY_CITY:
+                            caption+="在"+city
+                        options.append((f"{caption}有 {count} 个岗位",filters))
+                if options:
+                    break
+    return total,options

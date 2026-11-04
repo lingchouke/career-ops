@@ -9,7 +9,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from assessment import assess, resume_profile, suggestion
 from discovery import ALL, title_cn
-from job_store import ANY_CITY, library_stats, search
+from job_store import ANY_CITY, broader_searches, library_stats, search
 from sync_jobs import synchronize
 from nearwork import read_resume
 
@@ -65,7 +65,7 @@ class JobFinder:
         self.trail.set("近职     /     "+("第 1 步  填写求职条件","第 2 步  选择岗位","第 3 步  查看分析")[index])
         self.pages[index].tkraise()
         if index==1:
-            self.table.focus_set()
+            (self.table if self.results else self.empty_paste).focus_set()
 
     def create_form(self):
         page=self.pages[0]
@@ -169,14 +169,17 @@ class JobFinder:
 
     def set_busy(self, busy):
         self.busy=busy
-        for w in (self.upload,self.go,self.citybox,self.kinds,self.words,self.update_jobs,self.paste,self.stats_button):
+        for w in (self.upload,self.go,self.citybox,self.kinds,self.words,self.update_jobs,self.paste,self.stats_button,
+                  self.edit_conditions,self.empty_paste,self.empty_update,*self.suggestions.winfo_children()):
             w.state(["disabled" if busy else "!disabled"])
 
-    def update_library(self):
+    def update_library(self,from_results=False):
         if self.busy:
             return
         self.set_busy(True)
         self.notice.set("正在从企业招聘页下载岗位，请稍候…")
+        if from_results:
+            self.info.set(self.notice.get())
         def work():
             try:
                 updated,failed=synchronize()
@@ -187,19 +190,21 @@ class JobFinder:
                 message="未能完成更新，请检查公司清单和本机岗位文件后重试。"
             self.messages.put(message)
         threading.Thread(target=work,daemon=True).start()
-        self.root.after(100,self.finish_update)
+        self.root.after(100,lambda:self.finish_update(from_results))
 
-    def finish_update(self):
+    def finish_update(self,from_results):
         try:
             message=self.messages.get_nowait()
         except queue.Empty:
-            self.root.after(100,self.finish_update)
+            self.root.after(100,lambda:self.finish_update(from_results))
             return
         self.set_busy(False)
         self.refresh_library()
         self.notice.set(message)
+        if from_results:
+            self.find(update_note=message)
 
-    def paste_job(self):
+    def paste_job(self,from_results=False):
         if not self.resume:
             self.notice.set("请先上传简历，再粘贴岗位描述。")
             return
@@ -225,7 +230,7 @@ class JobFinder:
             job={"岗位":title,"岗位要求":desc,"公司":"","城市":"","来源":""}
             result=assess(self.resume,job)
             window.destroy()
-            self.display_analysis(job,title,result,manual=True)
+            self.display_analysis(job,title,result,manual=True,from_results=from_results)
         ttk.Button(form,text="对照我的简历",command=submit).pack(anchor="e",pady=(8,0))
         window.grab_set()
         body.focus_set()
@@ -236,11 +241,20 @@ class JobFinder:
         head.pack(fill="x")
         self.list_title=tk.StringVar()
         ttk.Label(head,textvariable=self.list_title,style="Title.TLabel").pack(side="left")
-        ttk.Button(head,text="返回修改条件",command=lambda:self.show(0)).pack(side="right")
+        self.edit_conditions=ttk.Button(head,text="返回修改条件",command=lambda:self.show(0))
+        self.edit_conditions.pack(side="right")
         self.info=tk.StringVar()
         ttk.Label(page,textvariable=self.info,wraplength=650,style="Muted.TLabel").pack(anchor="w",pady=(7,10))
-        container=ttk.Frame(page)
-        container.pack(fill="both",expand=True)
+        self.empty_panel=ttk.Frame(page)
+        actions=ttk.Frame(self.empty_panel)
+        actions.pack(anchor="w",pady=(0,10))
+        self.empty_paste=ttk.Button(actions,text="粘贴岗位描述来分析",command=lambda:self.paste_job(from_results=True))
+        self.empty_update=ttk.Button(actions,text="更新岗位数据",command=lambda:self.update_library(from_results=True))
+        self.empty_paste.pack(side="left",padx=(0,8))
+        self.empty_update.pack(side="left")
+        self.suggestions=ttk.Frame(self.empty_panel)
+        self.suggestions.pack(anchor="w")
+        self.result_table=container=ttk.Frame(page)
         self.table=ttk.Treeview(container,show="headings",columns=("job","company","place","grade"),selectmode="browse")
         for k,n,w in (("job","岗位",290),("company","公司",145),("place","地点",105),("grade","匹配度",80)):
             self.table.heading(k,text=n)
@@ -252,7 +266,13 @@ class JobFinder:
         self.table.bind("<ButtonRelease-1>",self.click_row)
         self.table.bind("<Return>",lambda _:self.open_selected())
 
-    def find(self):
+    def apply_suggestion(self,city,kind,word):
+        self.city.set(next(label for label,value in self.city_labels.items() if value==city))
+        self.kind.set(kind)
+        self.keyword.set(word)
+        self.find()
+
+    def find(self,update_note=""):
         if self.busy:
             return
         city=self.city_labels.get(self.city.get(),ANY_CITY)
@@ -262,30 +282,33 @@ class JobFinder:
         kind,word,resume=self.kind.get(),self.keyword.get().strip(),self.resume
         self.set_busy(True)
         self.notice.set("正在查找本机岗位，并逐个对照你的简历…")
+        self.info.set(self.notice.get())
         def work():
             try:
                 jobs=search(city,kind,word)
+                total,options=(None,[]) if jobs else broader_searches(city,kind,word)
                 entries=[]
                 profile=resume_profile(resume)
                 for j in jobs:
                     label=title_cn(j["岗位"])
                     entries.append((j,label,assess(resume,j,profile)))
                 entries.sort(key=lambda e:(("高","中","低").index(e[2]["grade"]),not bool(e[2]["facts"]),e[1],e[0]["公司"]))
-                self.messages.put((entries,None))
+                self.messages.put((entries,total,options,None))
             except Exception:
-                self.messages.put(([],"未能读取本机岗位，请返回重试。"))
+                self.messages.put(([],None,[],"未能读取本机岗位，请返回重试。"))
         threading.Thread(target=work,daemon=True).start()
-        self.root.after(100,lambda:self.finish(city,kind,word))
+        self.root.after(100,lambda:self.finish(city,kind,word,update_note))
 
-    def finish(self,city,kind,word):
+    def finish(self,city,kind,word,update_note):
         try:
-            entries,error=self.messages.get_nowait()
+            entries,total,options,error=self.messages.get_nowait()
         except queue.Empty:
-            self.root.after(100,lambda:self.finish(city,kind,word))
+            self.root.after(100,lambda:self.finish(city,kind,word,update_note))
             return
         self.set_busy(False)
         if error:
             self.notice.set(error)
+            self.info.set(error)
             return
         self.notice.set("")
         self.results=entries
@@ -294,10 +317,23 @@ class JobFinder:
             self.table.insert("","end",iid=str(i),values=(label,j["公司"],j.get("地址") or j["城市"],r["grade"]))
         self.list_title.set(f"找到 {len(entries)} 个岗位")
         scope=" · ".join(x for x in (city,kind,word) if x)
-        note="点一个岗位查看分析。" if entries else "本机没有符合条件的岗位。可以返回修改条件、更新岗位数据，或粘贴岗位描述。"
+        for widget in self.suggestions.winfo_children():
+            widget.destroy()
+        self.empty_panel.pack_forget()
+        self.result_table.pack_forget()
+        if entries:
+            self.result_table.pack(fill="both",expand=True)
+            note="点一个岗位查看分析。"
+        else:
+            note="岗位库目前是空的，请先点击更新岗位数据" if total==0 else "当前条件没有找到岗位。"
+            self.empty_panel.pack(fill="x")
+            if options:
+                ttk.Label(self.suggestions,text="试试放宽条件",style="Field.TLabel").pack(anchor="w",pady=(5,3))
+                for caption,filters in options:
+                    ttk.Button(self.suggestions,text=caption,command=lambda f=filters:self.apply_suggestion(*f)).pack(anchor="w",pady=3)
         if entries and all(result["grade"]=="低" for _,_,result in entries):
             note="这些岗位与你的简历方向差距较大，建议更新岗位数据或粘贴你想投的岗位"
-        self.info.set(note+"\n"+scope)
+        self.info.set("\n".join(filter(None,(note,scope,update_note))))
         self.show(1)
 
     def click_row(self,event):
@@ -328,9 +364,10 @@ class JobFinder:
         j,label,r=self.results[int(selection[0])]
         self.display_analysis(j,label,r)
 
-    def display_analysis(self,j,label,r,manual=False):
-        self.back.configure(text="‹ 返回求职条件" if manual else "‹ 返回岗位列表",
-                            command=lambda:self.show(0 if manual else 1))
+    def display_analysis(self,j,label,r,manual=False,from_results=False):
+        back_to_form=manual and not from_results
+        self.back.configure(text="‹ 返回求职条件" if back_to_form else "‹ 返回岗位列表",
+                            command=lambda:self.show(0 if back_to_form else 1))
         if manual:
             self.source_button.pack_forget()
         else:

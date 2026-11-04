@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from job_store import library_stats, search, status
+from job_store import ANY_CITY, ALL, broader_searches, library_stats, search, status
 from sync_jobs import synchronize
 
 
@@ -39,6 +39,13 @@ class LibraryTests(unittest.TestCase):
         with patch("sync_jobs.PAGE",2):
             self.assertEqual(self.sync(request),({"甲公司":1,"乙公司":2},{}))
         with patch("socket.socket.connect",side_effect=AssertionError("search attempted network access")):
+            total,options=broader_searches("柏林",ALL,"夹具",self.db)
+            self.assertEqual(total,3)
+            self.assertEqual(options,[
+                ("不限城市有 1 个岗位",(ANY_CITY,ALL,"夹具")),
+                ("不限岗位关键词在柏林有 2 个岗位",("柏林",ALL,""))])
+            total,options=broader_searches("深圳","制造","不存在",self.db)
+            self.assertEqual(options,[("不限城市、不限岗位关键词有 1 个岗位",(ANY_CITY,"制造",""))])
             stats = library_stats(self.db)
             self.assertEqual(stats.companies,{"甲公司":1,"乙公司":2})
             self.assertEqual(stats.cities,{"上海":3,"柏林":2})
@@ -67,6 +74,7 @@ class LibraryTests(unittest.TestCase):
         self.config.write_text("[]",encoding="utf-8")
         self.sync(partial)
         self.assertEqual(status(self.db)[0],0)
+        self.assertEqual(broader_searches("深圳",ALL,"",self.db),(0,[]))
 
 
 if __name__ == "__main__":
