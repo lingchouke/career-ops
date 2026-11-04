@@ -2,6 +2,8 @@
 
 <p align="center">开源的 AI 求职智能体。</p>
 
+此分支包含[近职中文通勤筛选](nearwork-cn/README.md)。在 Windows 上运行 `nearwork-cn/start.cmd`，选中岗位后可加入 Career-Ops 原生评估收件箱。
+
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.es.md">Español</a> |
