@@ -1,15 +1,8 @@
 """Search supported employers and summarize job evidence for the Chinese UI."""
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from nearwork import ALIASES, TOOLS, fetch_board, mentions
+from nearwork import ALIASES, TOOLS, mentions
 
 
-BOARDS = {
-    "sesai": ("SES AI", "新能源与制造"),
-    "asteralabs": ("Astera Labs", "芯片与硬件"),
-    "anydesk": ("AnyDesk", "软件与技术服务"),
-    "miqdigital": ("MiQ", "广告与营销"),
-}
 ALL = "不限行业"
 TITLES = {
     "account management + ad operations executive": "客户管理与广告运营专员",
@@ -52,26 +45,7 @@ def title_cn(title):
     if re.search(r"[一-龥]",title):
         return title
     name = re.sub(r"(?:\s*[-,]\s*|\s+)(?:china|shanghai)$","",title.strip(),flags=re.I)
-    return TITLES.get(name.casefold(), role_group(title)+"（职位简称）")
-
-
-def search_sources(city, industry):
-    sources = [s for s,(_,kind) in BOARDS.items() if industry in (ALL,kind)]
-    jobs, failed = [], []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(fetch_board,s,city):s for s in sources}
-        for future in as_completed(futures):
-            source = futures[future]
-            company, kind = BOARDS[source]
-            try:
-                rows = future.result()
-            except (OSError, ValueError, KeyError):
-                failed.append(company)
-                continue
-            for row in rows:
-                row.update({"公司":company, "行业":kind, "_source":source})
-            jobs.extend(rows)
-    return jobs, sorted(failed)
+    return TITLES.get(name.casefold(), role_group(title)+" · "+title)
 
 
 EXTRA_TOPICS = {

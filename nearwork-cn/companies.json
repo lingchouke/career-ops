@@ -1,0 +1,7 @@
+[
+  {"type": "greenhouse", "slug": "sesai", "name": "SES AI", "industry": "新能源与制造"},
+  {"type": "greenhouse", "slug": "asteralabs", "name": "Astera Labs", "industry": "芯片与硬件"},
+  {"type": "greenhouse", "slug": "anydesk", "name": "AnyDesk", "industry": "软件与技术服务"},
+  {"type": "greenhouse", "slug": "miqdigital", "name": "MiQ", "industry": "广告与营销"},
+  {"type": "lever", "slug": "anybotics", "name": "ANYbotics", "industry": "机器人与自动化"}
+]
