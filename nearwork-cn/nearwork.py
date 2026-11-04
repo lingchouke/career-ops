@@ -43,20 +43,64 @@ NEGATIVE = re.compile(r"没有|未曾|缺乏|尚未|不会|未取得|无.{0,4}(�
 
 
 def clauses(text):
-    return [s.strip(" \t•-") for s in re.split(r"[\n。；;]+", text) if s.strip(" \t•-")]
+    chunks = re.split(r"[\n。；;]+", text.replace("\xa0"," "))
+    return [s.strip().strip("•-").strip() for s in chunks if s.strip().strip("•-").strip()]
+
+
+SECTION = re.compile(r"(?:job responsibilities|responsibilities|required skills|(?:preferred |minimum |basic )?qualifications|requirements|what you.ll (?:do|bring)|岗位职责|工作职责|岗位要求|任职要求|任职资格|加分项)[:：]?", re.I)
+OTHER = re.compile(r"(?:the opportunity|about (?:us|the role|the company)|what we (?:value.*|offer)|benefits|公司介绍|公司福利|福利待遇|申请方式|apply for this job)[:：]?", re.I)
+META = re.compile(r"^(?:role|reports? to|location|department|职位名称|汇报对象|工作地点|所属部门)\s*[:：]", re.I)
+
+
+def requirements(jd):
+    lines = clauses(jd)
+    active = not any(SECTION.fullmatch(line) for line in lines)
+    for line in lines:
+        if SECTION.fullmatch(line):
+            active = True
+        elif OTHER.fullmatch(line):
+            active = False
+        elif active and not META.match(line):
+            yield line
+
+
+ALIASES = (
+    ("mechanical design", "机械设计", "机械产品设计"), ("structural design", "结构设计"),
+    ("mechanical engineering", "机械工程"), ("3d modeling", "三维建模", "3D建模"),
+    ("solidworks", "SolidWorks"), ("pro-e", "pro/e", "ProE", "Creo"),
+    ("AutoCAD", "CAD"), ("fixture design", "夹具设计", "工装设计"),
+    ("automation", "自动化"), ("metal processing", "金属加工"), ("battery", "电池"),
+    ("sales", "销售"), ("business development","商务拓展"), ("recruitment","招聘"),
+    ("product manager", "产品经理"), ("product management", "产品管理"),
+    ("data analysis", "数据分析"), ("project management", "项目管理"),
+    ("cross-team communication", "跨团队沟通", "跨部门沟通"),
+    ("programmatic advertising", "程序化广告"), ("technical support", "技术支持"),
+    ("troubleshooting", "故障排查"), ("english", "英语", "英文"),
+    ("customer service", "客户服务", "客服"), ("account management", "客户管理"),
+    ("DSP",), ("ADX",), ("SSP",), ("DV360",), ("RTB",),
+)
+
+
+def mentions(text, term):
+    if term.isascii():
+        return bool(re.search(r"(?<![a-z0-9])"+re.escape(term)+r"(?![a-z0-9])", text, re.I))
+    return term in text
 
 
 def compare(resume, jd):
     sentences = clauses(resume)
     evidence = [x for x in sentences if not NEGATIVE.search(x)]
     result = []
-    for demand in clauses(jd):
+    for demand in requirements(jd):
         family = next((f for f in FAMILIES if any(k in demand for k in f[0])), None)
-        terms = [t for t in TOOLS if t.lower() in demand.lower()]
+        terms = [t for t in TOOLS if mentions(demand,t)]
+        for group in ALIASES:
+            if any(mentions(demand,t) for t in group):
+                terms.extend(group)
         if family:
             terms.extend(k for k in family[0] if k in demand)
         exact = next((s for s in evidence if demand.casefold() in s.casefold()), "")
-        hit = next((s for s in evidence if any(t.lower() in s.lower() for t in terms)), "")
+        hit = next((s for s in evidence if any(mentions(s,t) for t in terms)), "")
         related = next((s for s in evidence if family and any(k in s for k in family[1])), "")
         hard = bool(re.search(r"必须|须持|持有|必备|硬性|must have|required certification", demand, re.I))
         denial = next((s for s in sentences if NEGATIVE.search(s) and

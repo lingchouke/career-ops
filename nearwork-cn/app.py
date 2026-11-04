@@ -287,7 +287,7 @@ class Nearwork:
     def summary(self,job,limit):
         route = self.routes.get(self.route_id(job))
         if not route:
-            return "待确认","通勤待确认"
+            return "待确认",("未查路线" if job.get("地址") else "缺上班地址")
         return ("范围内" if route[0]<=limit else "超范围"),f"{route[0]} 分钟"
 
     def refresh(self,prefer=None):
@@ -332,12 +332,22 @@ class Nearwork:
         if route:
             lines.append(f"从 {self.scope()[1]} 出发 · {self.scope()[2]} {self.scope()[3]} · {route[0]} 分钟 · {route[1]}")
         else:
-            lines.append("通勤待确认。核实上班地址后可查路线或记录实测耗时。")
+            lines.append("已有地址，可点击「查公交通勤」或记录实测耗时。" if job.get("地址") else
+                         "缺少具体上班地址。确认后点击「确认门店地址」，再查询路线。")
         cv = self.cv.get("1.0","end").strip()
         lines.extend(["","岗位要求与简历对照" if cv else "请先导入简历。以下是原始岗位描述。"])
         if cv:
-            for need,state,quote,tip,hard in compare(cv,job["岗位要求"]):
-                lines.extend(["",("【硬性条件】" if hard else "")+need,state+(" · “"+quote+"”" if quote else ""),tip])
+            rows = compare(cv,job["岗位要求"])
+            supported = [r for r in rows if r[1] in ("简历有相关原文","可能迁移")]
+            missing = [r for r in rows if r[1]=="待确认"]
+            lines.append(f"找到相关经历 {len(supported)} 项，明确差距 {len(rows)-len(supported)-len(missing)} 项，未找到依据 {len(missing)} 项。")
+            if not rows:
+                lines.append("未提取到职责或任职要求，请检查 JD 正文。")
+            for need,state,quote,tip,hard in supported+[r for r in rows if r[1]=="简历注明差距"]:
+                lines.extend(["",("【硬性条件】" if hard else "")+need,state+" · “"+quote+"”",tip])
+            if missing:
+                lines.extend(["","以下要求还没有找到简历依据；如确实做过，可点击「补充简历事实」。"])
+                lines.extend("• "+("【硬性条件】" if hard else "")+need for need,_,_,_,hard in missing)
         else:
             lines.append(job["岗位要求"])
         return "\n".join(lines)
@@ -427,6 +437,7 @@ class Nearwork:
 
 
 if __name__ == "__main__":
+    from finder import JobFinder
     root = tk.Tk()
-    Nearwork(root)
+    JobFinder(root)
     root.mainloop()
