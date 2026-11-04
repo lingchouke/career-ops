@@ -1,2 +1,3 @@
 __pycache__/
 jobs.sqlite3*
+analysis-cache.sqlite3*

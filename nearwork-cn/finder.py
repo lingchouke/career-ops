@@ -1,5 +1,6 @@
 """Three screens: search preferences, openings, and evidence for one opening."""
 import queue
+from concurrent.futures import Future
 import threading
 import tkinter as tk
 import webbrowser
@@ -7,7 +8,8 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from assessment import assess, resume_profile, suggestion
+from assessment import assess, resume_profile
+from ai_analysis import AnalysisError, analyze, settings
 from discovery import ALL, title_cn
 from job_store import ANY_CITY, broader_searches, library_stats, search
 from sync_jobs import synchronize
@@ -23,6 +25,9 @@ class JobFinder:
         self.resume=""
         self.results=[]
         self.selected=None
+        self.ai_config=settings()
+        self.analysis_view=None
+        self.pending_analyses={}
         self.messages=queue.Queue()
         self.busy=False
         style=ttk.Style()
@@ -65,6 +70,8 @@ class JobFinder:
         self.show(0)
 
     def show(self,index):
+        if index!=2:
+            self.analysis_view=None
         self.trail.set("近职     /     "+("第 1 步  填写求职条件","第 2 步  选择岗位","第 3 步  查看分析")[index])
         self.pages[index].tkraise()
         if index==1:
@@ -279,7 +286,7 @@ class JobFinder:
         self.suggestions.pack(anchor="w")
         self.result_table=container=ttk.Frame(page)
         self.table=ttk.Treeview(container,show="headings",columns=("job","company","place","grade"),selectmode="browse")
-        for k,n,w in (("job","岗位",290),("company","公司",145),("place","地点",105),("grade","匹配度",80)):
+        for k,n,w in (("job","岗位",290),("company","公司",145),("place","地点",105),("grade","初筛匹配度",100)):
             self.table.heading(k,text=n)
             self.table.column(k,width=w,minwidth=65,stretch=True)
         scroll=ttk.Scrollbar(container,command=self.table.yview)
@@ -372,6 +379,8 @@ class JobFinder:
         self.back=ttk.Button(row)
         self.back.pack(side="left")
         self.source_button=ttk.Button(row,text="查看招聘方原文",command=self.original)
+        ttk.Button(row,text="AI 服务设置",command=self.configure_ai).pack(side="left",padx=8)
+        self.retry=ttk.Button(row,text="重新分析",command=self.retry_analysis)
         self.detail=ScrolledText(page,wrap="word",relief="flat",font=("Microsoft YaHei UI",11),foreground="#273f39",
                                  padx=18,pady=12,background="white",state="disabled",cursor="arrow")
         self.detail.pack(fill="both",expand=True)
@@ -396,45 +405,142 @@ class JobFinder:
         else:
             self.source_button.pack(side="right")
         self.selected=j
+        self.analysis_view=(j,label,r,manual,from_results)
+        view=self.analysis_view
+        self.retry.pack_forget()
         box=self.detail
         box.configure(state="normal")
         box.delete("1.0","end")
-        box.insert("end","匹配度"+r["grade"]+"\n",r["grade"])
-        box.insert("end","  ·  ".join(filter(None,(label,j['公司'],j['城市'])))+"\n","item")
-        box.insert("end",r["reason"]+"\n")
-        box.insert("end","已满足项\n","heading")
-        if not r["facts"]:
-            box.insert("end","暂未找到足以支持这个岗位的简历原文。\n")
-        for fact,quote in r["facts"]:
-            box.insert("end","• "+fact+"\n","item")
-            box.insert("end","简历原文：“"+quote+"”\n","proof")
-        if r["grade"]=="低" and r["mismatch"]:
-            box.insert("end","这个岗位与你的简历方向差距较大，不建议投递\n","heading")
-            box.insert("end","可以优先考虑的岗位方向\n","heading")
-            for role,quote in r["directions"]:
-                box.insert("end","• "+role+"\n","item")
-                box.insert("end","简历原文：“"+quote+"”\n","proof")
-        else:
-            self.display_gaps(r["missing"])
+        box.insert("end",label+"\n","heading")
+        box.insert("end","正在读取已保存的分析，首次分析可能需要一点时间。")
+        box.configure(state="disabled")
+        self.show(2)
+        resume,config=self.resume,self.ai_config
+        key=(resume,j["岗位"],j["岗位要求"],config)
+        if key not in self.pending_analyses:
+            mailbox=Future()
+            self.pending_analyses[key]=mailbox
+            def work():
+                try:
+                    mailbox.set_result((analyze(resume,j,config),None))
+                except AnalysisError as exc:
+                    mailbox.set_result((None,str(exc)))
+                except Exception:
+                    mailbox.set_result((None,"无法完成分析，请检查提示词和本机保存目录后重试。"))
+            threading.Thread(target=work,daemon=True).start()
+        mailbox=self.pending_analyses[key]
+        def finish():
+            # Multiple visits can share one in-flight request. Only the latest view may render.
+            if not mailbox.done():
+                self.root.after(100,finish)
+                return
+            if self.pending_analyses.get(key) is mailbox:
+                del self.pending_analyses[key]
+            if self.analysis_view is not view:
+                return
+            report,error=mailbox.result()
+            if report:
+                self.render_report(report,resume)
+                return
+            box.configure(state="normal")
+            box.delete("1.0","end")
+            if error:
+                box.insert("end",error,"heading")
+                self.retry.pack(side="left")
+            else:
+                box.insert("end","本地初筛 · 匹配度"+r["grade"]+"\n","heading")
+                box.insert("end",r["reason"]+"\n")
+                for role,quote in r["directions"]:
+                    box.insert("end",role+"："+quote+"\n","proof")
+                box.insert("end","点上方「AI 服务设置」连接模型，即可查看逐项分析。")
+            box.configure(state="disabled")
+        self.root.after(20,finish)
+
+    def retry_analysis(self):
+        if self.analysis_view:
+            self.display_analysis(*self.analysis_view)
+
+    def configure_ai(self):
+        window=tk.Toplevel(self.root)
+        window.title("连接 AI 服务")
+        window.transient(self.root)
+        panel=ttk.Frame(window,padding=16)
+        panel.pack(fill="both",expand=True)
+        ttk.Label(panel,text="首次分析会把简历文字和岗位描述发给所选服务。\n已保存的结果可在本机直接查看。").pack(anchor="w")
+        base,model,old_key=self.ai_config
+        fields=[]
+        for name,value in (("服务地址",base),("模型名称",model),("服务密钥（本机模型可留空）","")):
+            ttk.Label(panel,text=name).pack(anchor="w",pady=(8,0))
+            entry=ttk.Entry(panel,width=48,show="*" if len(fields)==2 else "")
+            entry.insert(0,value)
+            entry.pack(fill="x")
+            fields.append(entry)
+        note=ttk.Label(panel,text="本次设置在关闭程序后清除。")
+        note.pack(anchor="w",pady=8)
+        def apply():
+            url,name,secret=(entry.get().strip() for entry in fields)
+            if not url or not name:
+                note.configure(text="请填写服务地址和模型名称。")
+                return
+            self.ai_config=(url,name,secret or (old_key if base==url else ""))
+            window.destroy()
+            self.retry_analysis()
+        ttk.Button(panel,text="使用此服务分析",command=apply).pack(anchor="e")
+        window.grab_set()
+
+    def render_report(self,report,resume,expanded=False):
+        box=self.detail
+        box.configure(state="normal")
+        box.delete("1.0","end")
+        grade={"high":"高","medium":"中","low":"低"}[report["match_level"]]
+        box.insert("end","匹配度"+grade+"\n",grade)
+        box.insert("end",report["summary"]+"\n")
+        def section(title,lines):
+            if lines:
+                box.insert("end",title+"\n","heading")
+                for line in lines:
+                    box.insert("end","• "+line+"\n")
+        def item(row):
+            box.insert("end",row["requirement"]+"\n","item")
+            if row["status"]!="missing" or row["evidence"]:
+                quote=row["evidence"]
+                proof="简历原文：“"+quote+"”" if quote.strip() and quote in resume else "证据未核实"
+                box.insert("end",proof+"\n","proof")
+            if row["status"]!="met":
+                if row["gap"]:
+                    box.insert("end","差距："+row["gap"]+"\n")
+                if row["advice"]:
+                    box.insert("end","建议："+row["advice"]+"\n","proof")
+        if not report["direction_mismatch"]:
+            section("最该先补的 3 件事",report["top_priorities"])
+            for title,status,importance in (("欠缺项 · 必须","missing","must"),
+                                            ("欠缺项 · 加分","missing","nice"),
+                                            ("部分满足项","partial",None)):
+                rows=[r for r in report["requirements"] if r["status"]==status and
+                      (importance is None or r["importance"]==importance)]
+                if rows:
+                    box.insert("end",title+"\n","heading")
+                    for row in rows:
+                        item(row)
+            met=[r for r in report["requirements"] if r["status"]=="met"]
+            if met:
+                def toggle():
+                    position=box.yview()[0]
+                    self.render_report(report,resume,not expanded)
+                    box.yview_moveto(position)
+                button=ttk.Button(box,text=f"已满足项（{len(met)}） · "+("收起" if expanded else "展开"),command=toggle)
+                box.window_create("end",window=button)
+                box.insert("end","\n")
+                if expanded:
+                    for row in met:
+                        item(row)
+        if grade=="低":
+            section("更适合你的岗位方向",report["better_fit"])
+        if not report["direction_mismatch"]:
+            section("协作与工作习惯",[report["soft_skills_note"]] if report["soft_skills_note"] else [])
+            section("还不明确的要求",report["unclear"])
         box.configure(state="disabled")
         box.yview_moveto(0)
-        self.show(2)
-
-    def display_gaps(self,missing):
-        box=self.detail
-        box.insert("end","欠缺项与建议\n","heading")
-        if not any(missing.values()):
-            box.insert("end","目前没有可列出的具体欠缺项。\n")
-            return
-        box.insert("end","以下要求还缺少简历原文支持。如果做过，可以补充具体经历。\n")
-        for key,heading in (("必须","必须具备"),("加分","加分条件"),("其他","岗位还提到（未说明是否必须）")):
-            items=missing[key]
-            if not items:
-                continue
-            box.insert("end",heading+"\n","heading")
-            for item in items:
-                box.insert("end","• "+item+"\n","item")
-                box.insert("end","建议："+suggestion(item)+"\n","proof")
 
     def original(self):
         if self.selected:
