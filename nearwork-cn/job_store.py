@@ -67,6 +67,7 @@ class LibraryStats:
     industries: list
     companies: dict
     cities: dict
+    industries_by_city: dict
 
 def connect(path=DB):
     db = sqlite3.connect(path, timeout=15)
@@ -94,7 +95,7 @@ def save(db, source, rows, updated):
 
 def library_stats(path=DB):
     if not Path(path).exists():
-        return LibraryStats(0,None,[],{}, {})
+        return LibraryStats(0,None,[],{}, {},{})
     with closing(sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro",uri=True)) as db:
         db.execute("BEGIN")
         updated, = db.execute("SELECT max(updated) FROM sources").fetchone()
@@ -102,11 +103,15 @@ def library_stats(path=DB):
         companies = dict(db.execute("""SELECT company,count(jobs.id) AS n FROM sources
                     LEFT JOIN jobs USING(source) GROUP BY company ORDER BY n DESC, company"""))
         cities = Counter()
-        for location, count in db.execute("SELECT location,count(*) FROM jobs GROUP BY location"):
+        industries_by_city = {ANY_CITY: Counter()}
+        for location, industry, count in db.execute("""SELECT location,industry,count(*) FROM jobs
+                JOIN sources USING(source) GROUP BY location,industry"""):
+            industries_by_city[ANY_CITY][industry] += count
             for name in location_cities(location):
                 cities[name] += count
+                industries_by_city.setdefault(name,Counter())[industry] += count
     ordered = dict(sorted(cities.items(),key=lambda pair:(pair[0]==UNKNOWN_CITY,-pair[1],pair[0])))
-    return LibraryStats(sum(companies.values()),updated,industries,companies,ordered)
+    return LibraryStats(sum(companies.values()),updated,industries,companies,ordered,industries_by_city)
 
 def status(path=DB):
     stats = library_stats(path)

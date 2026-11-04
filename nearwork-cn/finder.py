@@ -51,6 +51,8 @@ class JobFinder:
         self.city=tk.StringVar(value=ANY_CITY)
         self.city_labels={ANY_CITY:ANY_CITY}
         self.kind=tk.StringVar(value=ALL)
+        self.kind_labels={ALL:ALL}
+        self.stats=None
         self.keyword=tk.StringVar()
         self.file=tk.StringVar(value="可选择文字版 PDF、Word 或文本文件")
         self.notice=tk.StringVar()
@@ -83,6 +85,7 @@ class JobFinder:
             ttk.Label(form,text=label,style="Field.TLabel").grid(row=i,column=0,padx=(0,18),pady=9,sticky="w")
         self.citybox=ttk.Combobox(form,textvariable=self.city,values=[ANY_CITY],state="readonly",width=24)
         self.citybox.grid(row=0,column=1,sticky="w")
+        self.citybox.bind("<<ComboboxSelected>>",lambda _:self.refresh_industry_choices())
         self.kinds=ttk.Combobox(form,textvariable=self.kind,values=[ALL],state="readonly",width=24)
         self.kinds.grid(row=1,column=1,sticky="w")
         self.words=ttk.Entry(form,textvariable=self.keyword,width=27)
@@ -121,21 +124,31 @@ class JobFinder:
 
     def refresh_library(self):
         try:
-            stats=library_stats()
+            stats=self.stats=library_stats()
         except Exception:
             self.library.set("暂时无法读取本机的岗位。仍可粘贴岗位描述进行分析。")
             return
         selected=self.city_labels.get(self.city.get(),ANY_CITY)
-        self.city_labels={ANY_CITY:ANY_CITY}
-        self.city_labels.update({f"{city}（{count} 个岗位）":city for city,count in stats.cities.items()})
+        self.city_labels={f"{city}（{count} 个岗位）":city
+                          for city,count in [(ANY_CITY,stats.total),*stats.cities.items()]}
         self.citybox.configure(values=list(self.city_labels))
-        self.city.set(next((label for label,city in self.city_labels.items() if city==selected),ANY_CITY))
-        count,updated,kinds=stats.total,stats.updated,stats.industries
-        self.kinds.configure(values=[ALL]+kinds)
-        if self.kind.get() not in [ALL]+kinds:
-            self.kind.set(ALL)
+        self.city.set(next((label for label,city in self.city_labels.items() if city==selected),next(iter(self.city_labels))))
+        count,updated=stats.total,stats.updated
+        self.refresh_industry_choices()
         self.library.set(f"本机有 {count} 个岗位 · 最近更新 {updated[:16].replace('T',' ')}"
                          if updated else "首次使用请点「更新岗位数据」。之后可以离线查找。")
+
+    def refresh_industry_choices(self,selected=None):
+        if self.stats is None:
+            return
+        if selected is None:
+            selected=self.kind_labels.get(self.kind.get(),ALL)
+        city=self.city_labels[self.city.get()]
+        counts=self.stats.industries_by_city.get(city,{})
+        choices=[(ALL,sum(counts.values()))]+[(kind,counts.get(kind,0)) for kind in self.stats.industries]
+        self.kind_labels={f"{kind}（{count} 个岗位）":kind for kind,count in choices}
+        self.kinds.configure(values=list(self.kind_labels))
+        self.kind.set(next((label for label,kind in self.kind_labels.items() if kind==selected),next(iter(self.kind_labels))))
 
     def show_statistics(self):
         try:
@@ -268,7 +281,7 @@ class JobFinder:
 
     def apply_suggestion(self,city,kind,word):
         self.city.set(next(label for label,value in self.city_labels.items() if value==city))
-        self.kind.set(kind)
+        self.refresh_industry_choices(selected=kind)
         self.keyword.set(word)
         self.find()
 
@@ -279,7 +292,7 @@ class JobFinder:
         if not self.resume:
             self.notice.set("请先上传简历。")
             return
-        kind,word,resume=self.kind.get(),self.keyword.get().strip(),self.resume
+        kind,word,resume=self.kind_labels[self.kind.get()],self.keyword.get().strip(),self.resume
         self.set_busy(True)
         self.notice.set("正在查找本机岗位，并逐个对照你的简历…")
         self.info.set(self.notice.get())
