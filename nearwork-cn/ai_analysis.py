@@ -48,9 +48,8 @@ def validate(report):
         if not ok:
             raise AnalysisError("分析结果格式不完整，请重试。")
 
-    require(isinstance(report,dict) and report.get("match_level") in ("high","medium","low"))
+    require(isinstance(report,dict) and "match_level" not in report)
     require(type(report.get("direction_mismatch")) is bool)
-    require(not report["direction_mismatch"] or report["match_level"]=="low")
     require(isinstance(report.get("summary"),str) and report["summary"].strip())
     require(isinstance(report.get("soft_skills_note"),str))
     for field in ("top_priorities","unclear","better_fit","requirements"):
@@ -62,12 +61,14 @@ def validate(report):
     for row in report["requirements"]:
         require(isinstance(row,dict) and all(isinstance(row.get(k),str) for k in
                 ("requirement","importance","status","evidence","gap","advice")))
+        require(type(row.get("hard_gate")) is bool)
         name=row["requirement"].strip().casefold()
         require(name and name not in names)
         names.add(name)
         require(row["importance"] in ("must","nice") and row["status"] in ("met","partial","missing"))
         require(len(row["advice"])<=80)
-    if report["match_level"]=="low":
+    must=[r for r in report["requirements"] if r["importance"]=="must"]
+    if report["direction_mismatch"] or sum(r["status"]=="missing" for r in must)*2>len(must):
         require(2<=len(report["better_fit"])<=3)
     for i,item in enumerate(report["better_fit"]):
         if isinstance(item,dict):
@@ -85,10 +86,36 @@ def contact_redacted(text):
     return re.sub(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)", "[电话]", text)
 
 
+def report_key(prompt,resume,job):
+    data={"岗位名称":job["岗位"],"岗位描述":job["岗位要求"]}
+    return hashlib.sha256(json.dumps([prompt,resume,data],ensure_ascii=False).encode()).hexdigest()
+
+
+def list_scores(resume,jobs):
+    from scoring import score
+    if not CACHE.exists():
+        return [None]*len(jobs)
+    current=PROMPT.read_text(encoding="utf8")
+    previous=PROMPT.with_name("analysis-v1.md").read_text(encoding="utf8")
+    results=[]
+    with closing(sqlite3.connect(CACHE)) as db:
+        for job in jobs:
+            def lookup(prompt):
+                return db.execute("SELECT report FROM reports WHERE id=?",(report_key(prompt,resume,job),)).fetchone()
+            row=lookup(current)
+            if row:
+                try:
+                    results.append(score(validate(json.loads(row[0])),resume)[0])
+                except (ValueError,AnalysisError):
+                    results.append("需要重新分析")
+            else:
+                results.append("需要重新分析" if lookup(previous) else None)
+    return results
+
 def analyze(resume, job, config, *, cache=CACHE, prompt_path=PROMPT, send=request_ai):
     prompt=prompt_path.read_text(encoding="utf-8")
     data={"岗位名称":job["岗位"],"岗位描述":job["岗位要求"]}
-    digest=hashlib.sha256(json.dumps([prompt,resume,data],ensure_ascii=False).encode()).hexdigest()
+    digest=report_key(prompt,resume,job)
     with closing(sqlite3.connect(cache,timeout=15)) as db:
         db.execute("CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, report TEXT NOT NULL)")
         cached=db.execute("SELECT report FROM reports WHERE id=?",(digest,)).fetchone()

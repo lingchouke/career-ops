@@ -17,7 +17,7 @@ class AnalysisTests(unittest.TestCase):
         self.prompt=Path(folder.name)/"prompt.md"
         self.prompt.write_text("分析规则",encoding="utf-8")
         self.job={"岗位":"工程师","岗位要求":"独立出图"}
-        self.report={"match_level":"medium","summary":"有制图经验。","direction_mismatch":False,
+        self.report={"summary":"有制图经验。","direction_mismatch":False,
                      "requirements":[],"soft_skills_note":"","unclear":[],"better_fit":[],"top_priorities":[]}
 
     def run_analysis(self, config, **kwargs):

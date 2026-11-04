@@ -1,5 +1,7 @@
 """Local job snapshots. Search and status have no network dependencies."""
 import sqlite3
+import json
+from extraction import schema, extract_row, LEVELS
 import re
 from collections import Counter
 from contextlib import closing
@@ -81,6 +83,7 @@ def connect(path=DB):
             title TEXT NOT NULL, location TEXT NOT NULL, description TEXT NOT NULL, url TEXT NOT NULL,
             keywords TEXT NOT NULL, PRIMARY KEY(source,id));
     """)
+    schema(db)
     return db
 
 
@@ -91,7 +94,38 @@ def save(db, source, rows, updated):
         db.execute("INSERT INTO sources VALUES (?,?,?,?)", (key,source["name"],source["industry"],updated))
         db.executemany("INSERT INTO jobs VALUES (?,?,?,?,?,?,?)",
                        ((key, ident, title, loc, desc, url, (title+" "+title_cn(title)).casefold())
-                        for ident,title,loc,desc,url in rows))
+                        for ident,title,loc,desc,url,*extra in rows))
+
+        db.execute("INSERT OR REPLACE INTO ownership VALUES (?,?,?)",(key,source.get("domestic"),source.get("foreign_form")))
+        for ident,title,loc,desc,url,*extra in rows:
+            extract_row(db,key,ident,desc,extra[0] if extra else None)
+        db.execute("DELETE FROM extracted WHERE source=? AND id NOT IN (SELECT id FROM jobs WHERE source=?)",(key,key))
+
+def company_form(place,domestic,foreign):
+    if not place or place.strip().casefold() in {"remote","anywhere","global","worldwide","multiple locations","远程","不限","全球"}:
+        return None
+    local=bool(location_cities(place) & (set(CITIES)-{"新加坡"})) or re.search(r"\bchina\b|中国",place,re.I)
+    return domestic if local else foreign
+
+def matches(row,filters):
+    if not filters: return True
+    if filters.get("ownership") and filters["ownership"]!=(row["性质"] or "未写明"): return False
+    for field in ("years","degree","salary","languages"):
+        value=row[field]
+        if field in filters.get("only",()):
+            if value is not None: return False
+            continue
+        if value is None:
+            if not filters.get("unknown",True): return False
+            continue
+        if field=="years" and filters.get("years") is not None and value>filters["years"]: return False
+        if field=="degree" and filters.get("degree") and LEVELS[value]>LEVELS[filters["degree"]]: return False
+        if field=="salary":
+            for bound,key in (("low","cny_max"),("high","cny_min")):
+                amount=filters.get(bound)
+                if amount is not None and (value[key] is None or (value[key]<amount if bound=="low" else value[key]>amount)): return False
+        if field=="languages" and filters.get("language") and not any(filters["language"].casefold() in (v["language"]+" "+(v["level"] or "")).casefold() for v in value): return False
+    return True
 
 
 def library_stats(path=DB):
@@ -150,19 +184,30 @@ def open_search_db(path):
     return db
 
 
-def search(city, industry, keywords, path=DB):
+def search(city, industry, keywords, path=DB, filters=None):
     if not Path(path).exists():
         return []
     suffix,params=search_filter(city,industry,keywords)
     with closing(open_search_db(path)) as db:
-        rows=db.execute("SELECT title,company,location,description,url"+suffix,params)
-        return [dict(zip(("岗位","公司","城市","岗位要求","来源"),r)) for r in rows]
+        where=suffix.partition(" WHERE ")[2]
+        sql="""SELECT title,company,location,description,url,years,degree,salary,languages,domestic,foreign_form
+               FROM jobs JOIN sources USING(source) LEFT JOIN extracted USING(source,id) LEFT JOIN ownership USING(source)"""
+        rows=db.execute(sql+(" WHERE "+where if where else ""),params)
+        result=[]
+        for values in rows:
+            row=dict(zip(("岗位","公司","城市","岗位要求","来源","years","degree","salary","languages"),values))
+            row["性质"]=company_form(row["城市"],*values[-2:])
+            for field in ("salary","languages"):
+                if row[field]: row[field]=json.loads(row[field])
+            if matches(row,filters): result.append(row)
+        return result
 
 
-def broader_searches(city, industry, keywords, path=DB):
+def broader_searches(city, industry, keywords, path=DB, filters=None):
     """Offer the smallest changes that yield results, counted against one local snapshot."""
     if not Path(path).exists():
         return 0, []
+    advanced=filters
     original=(city,industry,keywords)
     defaults=(ANY_CITY,ALL,"")
     captions=("不限城市","不限公司类型","不限岗位关键词")
@@ -177,6 +222,8 @@ def broader_searches(city, industry, keywords, path=DB):
                     filters=tuple(defaults[i] if i in relaxed else value for i,value in enumerate(original))
                     suffix,params=search_filter(*filters)
                     count,=db.execute("SELECT count(*)"+suffix,params).fetchone()
+                    if advanced:
+                        count=len(search(*filters,path,filters=advanced))
                     if count:
                         caption="、".join(captions[i] for i in relaxed)
                         if 0 not in relaxed and city and city!=ANY_CITY:

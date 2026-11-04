@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from http.client import HTTPException
 from pathlib import Path
 
+from extraction import enrich, extract_row, FIELDS
 from job_store import DB, connect, save
 from nearwork import get_json
 
@@ -96,13 +97,13 @@ def fetch(source, request=get_json):
                 seen.add(key)
                 cat = row.get("categories") or {}
                 loc = [cat.get("location")] + (cat.get("allLocations") or [])
-                yield key,row["text"]," / ".join(dict.fromkeys(filter(None,loc))),lever_text(row),row["hostedUrl"]
+                yield key,row["text"]," / ".join(dict.fromkeys(filter(None,loc))),lever_text(row),row["hostedUrl"],row.get("salaryRange")
             offset += len(rows)
             if len(rows) < PAGE:
                 break
 
 
-def synchronize(config=CONFIG, path=DB, request=get_json):
+def synchronize(config=CONFIG, path=DB, request=get_json, ai_config=None):
     sources = companies(config)
     updated, failed = {}, {}
     with closing(connect(path)) as db:
@@ -110,7 +111,7 @@ def synchronize(config=CONFIG, path=DB, request=get_json):
             try:
                 rows = list(fetch(source,request))
                 ids = set()
-                for ident,title,location,desc,url in rows:
+                for ident,title,location,desc,url,*extra in rows:
                     if not ident or ident in ids or not title.strip() or not url.startswith("https://"):
                         raise ValueError("岗位信息不完整")
                     ids.add(ident)
@@ -124,14 +125,42 @@ def synchronize(config=CONFIG, path=DB, request=get_json):
         with db:
             db.executemany("DELETE FROM sources WHERE source=?",
                            [(k,) for k, in db.execute("SELECT source FROM sources") if k not in keep])
+        enrich(db,ai_config)
     return updated, failed
 
+
+def backfill(path=DB,config=CONFIG,ai_config=None):
+    with closing(connect(path)) as db:
+        with db:
+            for row in companies(config):
+                db.execute("INSERT OR REPLACE INTO ownership VALUES (?,?,?)",(row["type"]+":"+row["slug"],row.get("domestic"),row.get("foreign_form")))
+        for source,ident,desc in db.execute("SELECT jobs.source,jobs.id,description FROM jobs LEFT JOIN extracted USING(source,id) WHERE fingerprint IS NULL").fetchall():
+            with db:
+                extract_row(db,source,ident,desc)
+        enrich(db,ai_config)
+
+def audit(path):
+    with closing(connect(path)) as db:
+        for row in db.execute("""SELECT title,company,description,years,degree,salary,languages,origins,quotes
+                                 FROM jobs JOIN sources USING(source) LEFT JOIN extracted USING(source,id)
+                                 ORDER BY random() LIMIT 20"""):
+            print(row[0],row[1])
+            for field,value in zip(FIELDS,row[3:7]):
+                print(field,value,json.loads(row[7] or "{}").get(field),json.loads(row[8] or "{}").get(field,"未找到原文"))
+            print("描述节选",row[2][:180])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="下载公开岗位到本机")
     parser.add_argument("--config", default=CONFIG)
     parser.add_argument("--db", default=DB)
+    parser.add_argument("action",nargs="?",choices=["sync","backfill","audit"],default="sync")
     args = parser.parse_args()
+    if args.action=="audit":
+        audit(args.db)
+        raise SystemExit
+    if args.action=="backfill":
+        backfill(args.db,args.config)
+        raise SystemExit
     updated, failed = synchronize(args.config,args.db)
     for name, count in updated.items():
         print(f"{name}：已更新 {count} 个岗位")
