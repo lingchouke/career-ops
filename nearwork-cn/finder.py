@@ -53,6 +53,7 @@ class JobFinder:
         self.kind=tk.StringVar(value=ALL)
         self.kind_labels={ALL:ALL}
         self.stats=None
+        self.job_count=tk.StringVar(value="暂时无法统计")
         self.keyword=tk.StringVar()
         self.file=tk.StringVar(value="可选择文字版 PDF、Word 或文本文件")
         self.notice=tk.StringVar()
@@ -81,16 +82,18 @@ class JobFinder:
         form=ttk.Frame(page)
         form.pack(fill="x",pady=4)
         form.columnconfigure(1,weight=1)
-        for i,label in enumerate(("工作城市","公司类型","岗位关键词")):
+        for i,label in enumerate(("工作城市","公司类型","岗位数量","岗位关键词")):
             ttk.Label(form,text=label,style="Field.TLabel").grid(row=i,column=0,padx=(0,18),pady=9,sticky="w")
         self.citybox=ttk.Combobox(form,textvariable=self.city,values=[ANY_CITY],state="readonly",width=24)
         self.citybox.grid(row=0,column=1,sticky="w")
         self.citybox.bind("<<ComboboxSelected>>",lambda _:self.refresh_industry_choices())
         self.kinds=ttk.Combobox(form,textvariable=self.kind,values=[ALL],state="readonly",width=24)
         self.kinds.grid(row=1,column=1,sticky="w")
+        self.kinds.bind("<<ComboboxSelected>>",lambda _:self.refresh_job_count())
+        ttk.Label(form,textvariable=self.job_count,style="Field.TLabel").grid(row=2,column=1,sticky="w")
         self.words=ttk.Entry(form,textvariable=self.keyword,width=27)
-        self.words.grid(row=2,column=1,sticky="w")
-        ttk.Label(form,text="如「机械工程师」。留空可看所有岗位。",style="Muted.TLabel").grid(row=3,column=1,sticky="w")
+        self.words.grid(row=3,column=1,sticky="w")
+        ttk.Label(form,text="如「机械工程师」。留空可看以上全部岗位。",style="Muted.TLabel").grid(row=4,column=1,sticky="w")
         actions=ttk.Frame(page)
         actions.pack(anchor="w",pady=(18,8))
         self.go=ttk.Button(actions,text="查找岗位",style="Go.TButton",command=self.find)
@@ -144,11 +147,18 @@ class JobFinder:
         if selected is None:
             selected=self.kind_labels.get(self.kind.get(),ALL)
         city=self.city_labels[self.city.get()]
-        counts=self.stats.industries_by_city.get(city,{})
-        choices=[(ALL,sum(counts.values()))]+[(kind,counts.get(kind,0)) for kind in self.stats.industries]
-        self.kind_labels={f"{kind}（{count} 个岗位）":kind for kind,count in choices}
+        self.kind_labels={f"{kind}（{self.stats.company_counts.get((city,kind),0)} 家公司）":kind
+                          for kind in [ALL]+self.stats.industries}
         self.kinds.configure(values=list(self.kind_labels))
         self.kind.set(next((label for label,kind in self.kind_labels.items() if kind==selected),next(iter(self.kind_labels))))
+        self.refresh_job_count()
+
+    def refresh_job_count(self):
+        if self.stats is not None:
+            counts=self.stats.industries_by_city.get(self.city_labels[self.city.get()],{})
+            kind=self.kind_labels[self.kind.get()]
+            total=sum(counts.values()) if kind==ALL else counts.get(kind,0)
+            self.job_count.set(f"{total} 个岗位")
 
     def show_statistics(self):
         try:
